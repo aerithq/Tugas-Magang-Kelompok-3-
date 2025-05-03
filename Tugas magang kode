@@ -1,0 +1,139 @@
+#include <Wire.h>
+#include <MPU6050.h>
+
+#define DEG_TO_RAD 0.0174533
+
+MPU6050 mpu;
+
+// Variabel sensor
+int16_t ax, ay, az;
+int16_t gx, gy, gz;
+
+// Kalibrasi
+long gyroX_cal = 0, gyroY_cal = 0, gyroZ_cal = 0;
+bool set_gyro_angles = false;
+
+// Sudut
+float angle_pitch = 0, angle_roll = 0;
+float angle_pitch_output = 0, angle_roll_output = 0;
+
+// Timer
+unsigned long prevTime = 0;
+unsigned long ledTimer = 0;
+bool ledState = false;
+
+// Pin ESP32
+const int ledPin = 2;
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
+
+float deltaTime;
+int ledDelay = 0;
+float gyroSensitivity = 131.0; // ±250°/s
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(SDA_PIN, SCL_PIN);
+  mpu.initialize();
+  pinMode(ledPin, OUTPUT);
+
+  if (!mpu.testConnection()) {
+    Serial.println("MPU6050 connection failed!");
+    while (1);
+  }
+
+  // Kalibrasi gyro
+  for (int i = 0; i < 1000; i++) {
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    gyroX_cal += gx;
+    gyroY_cal += gy;
+    gyroZ_cal += gz;
+    delay(3);
+  }
+  gyroX_cal /= 1000;
+  gyroY_cal /= 1000;
+  gyroZ_cal /= 1000;
+
+  prevTime = millis();
+}
+
+void loop() {
+  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+  gx -= gyroX_cal;
+  gy -= gyroY_cal;
+  gz -= gyroZ_cal;
+
+  // Hitung deltaTime
+  unsigned long currentTime = millis();
+  deltaTime = (currentTime - prevTime) / 1000.0; // detik
+  prevTime = currentTime;
+
+  // Konversi ke derajat per detik
+  float gyroXrate = (float)gx / gyroSensitivity;
+  float gyroYrate = (float)gy / gyroSensitivity;
+  float gyroZrate = (float)gz / gyroSensitivity;
+
+  // Hitung sudut
+  angle_pitch += gyroXrate * deltaTime;
+  angle_roll  += gyroYrate * deltaTime;
+
+  angle_pitch += angle_roll * sin(gyroZrate * deltaTime * DEG_TO_RAD);
+  angle_roll  -= angle_pitch * sin(gyroZrate * deltaTime * DEG_TO_RAD);
+
+  // Koreksi dengan akselerometer
+  long acc_total_vector = sqrt((ax * ax) + (ay * ay) + (az * az));
+  if (acc_total_vector != 0) {
+  //  float angle_pitch_acc = asin((float)ay / acc_total_vector) * 57.296;
+  //  float angle_roll_acc  = asin((float)ax / acc_total_vector) * -57.296;
+  // Sudut dari akselerometer
+    float angle_pitch_acc = atan2(ay, az) * 57.296;
+    float angle_roll_acc  = atan2(ax, az) * 57.296;
+
+
+
+    // Koreksi drift dengan filter
+    angle_pitch = angle_pitch * 0.98 + angle_pitch_acc * 0.02;
+    angle_roll  = angle_roll  * 0.98 + angle_roll_acc  * 0.02;
+
+    if (set_gyro_angles) {
+      angle_pitch = angle_pitch * 0.9996 + angle_pitch_acc * 0.0004;
+      angle_roll  = angle_roll  * 0.9996 + angle_roll_acc  * 0.0004;
+    } else {
+      angle_pitch = angle_pitch_acc;
+      angle_roll  = angle_roll_acc;
+      set_gyro_angles = true;
+    }
+  }
+
+  // Filter (smooth)
+  angle_pitch_output = angle_pitch_output * 0.9 + angle_pitch * 0.1;
+  angle_roll_output  = angle_roll_output  * 0.9 + angle_roll  * 0.1;
+
+  float pitchAbs = abs(angle_pitch_output);
+
+  Serial.print("Pitch: ");
+  Serial.println(pitchAbs);
+
+  // LED kontrol berdasarkan pitch
+  if (pitchAbs <= 90) {
+    ledDelay = 0;
+    digitalWrite(ledPin, LOW);
+  } else if (pitchAbs > 90 && pitchAbs <= 180) {
+    // Makin dekat ke 180, makin cepat
+    ledDelay = map(pitchAbs, 90, 180, 500, 50);
+  } else if (pitchAbs > 180 && pitchAbs < 360) {
+    // Makin jauh dari 180 ke 0, makin lambat
+    ledDelay = map(pitchAbs, 180, 360, 50, 1000);
+  } else {
+    ledDelay = 0;
+    digitalWrite(ledPin, LOW);
+  }
+
+  // Non-blocking blink
+  if (ledDelay > 0 && millis() - ledTimer >= ledDelay) {
+    ledState = !ledState;
+    digitalWrite(ledPin, ledState);
+    ledTimer = millis();
+  }
+}
